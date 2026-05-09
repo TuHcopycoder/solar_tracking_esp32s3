@@ -16,10 +16,6 @@ void pump_init(void) {
 }
 
 void pump_control(bool state) {
-    /* 
-       LƯU Ý: Nếu bạn dùng Module Relay có Jumper set ở 'L' (Low):
-       - state = true  (Bật) -> Xuất mức 0 (LOW)
-       - state = false (Tắt) -> Xuất mức 1 (HIGH)
-    */
+
     gpio_set_level(PUMP_PIN, state ? 1 : 0); 
 }    
