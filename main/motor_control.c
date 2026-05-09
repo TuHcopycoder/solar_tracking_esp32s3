@@ -4,12 +4,12 @@
 
 static const char *TAG = "MOTOR_TASK";
 
-#define SERVO_MIN_WIDTH_US 500.0f
-#define SERVO_MAX_WIDTH_US 2500.0f
+#define SERVO_MIN_WIDTH_US 350.0f
+#define SERVO_MAX_WIDTH_US 3550.0f
 #define SERVO_MAX_ANGLE    180.0f
 #define SERVO_FREQ         50
 
-static uint32_t g_full_duty = 0;
+static uint32_t g_full_duty = 0;    
 QueueHandle_t motor_queue = NULL;
 
 static uint32_t calculate_duty(float angle) {
