@@ -4,38 +4,63 @@
 
 static const char *TAG = "NTC_SENSOR";
 
-// Thông số kỹ thuật của cảm biến nhiệt độ NTC 10k phổ thông
-#define R_NOMINAL    10000.0f  // Trở kháng 10k ở 25 độ C
-#define T_NOMINAL    298.15f   // Nhiệt độ chuẩn Kelvin (25 + 273.15)
-#define BETA         3950.0f   // Hệ số Beta của NTC
-#define R_REF        10000.0f  // Điện trở phân áp 10k
-#define ADC_MAX      4095.0f   // Phân giải ADC 12-bit của ESP32-S3
+// Khởi tạo các handle
+QueueHandle_t ntc_queue = NULL;
+SemaphoreHandle_t ntc_mutex = NULL;
+SemaphoreHandle_t ntc_threshold_sem = NULL;
+
+#define R_NOMINAL    10000.0f  
+#define T_NOMINAL    298.15f   
+#define BETA         3950.0f   
+#define R_REF        10000.0f  
+#define ADC_MAX      4095.0f   
+#define TEMP_THRESHOLD 40.0f   // Ngưỡng nhiệt độ để kích hoạt Semaphore (ví dụ 40 độ C)
+
+void ntc_init_rtos(void) {
+    // Tạo Mutex để bảo vệ tài nguyên ADC
+    ntc_mutex = xSemaphoreCreateMutex();
+    // Tạo Queue chứa tối đa 5 giá trị nhiệt độ (float)
+    ntc_queue = xQueueCreate(5, sizeof(float));
+    // Tạo Binary Semaphore để báo động nhiệt độ cao
+    ntc_threshold_sem = xSemaphoreCreateBinary();
+}
 
 float ntc_read_temp(adc_oneshot_unit_handle_t adc_handle) {
     int raw_adc;
-    // Đọc giá trị ADC thô
-    esp_err_t ret = adc_oneshot_read(adc_handle, NTC_ADC_CHANNEL, &raw_adc);
+    esp_err_t ret;
+
+    // 1. Dùng Mutex để tranh chấp quyền đọc ADC
+    if (xSemaphoreTake(ntc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        ret = adc_oneshot_read(adc_handle, NTC_ADC_CHANNEL, &raw_adc);
+        xSemaphoreGive(ntc_mutex); // Nhả Mutex ngay sau khi đọc xong ADC thô
+    } else {
+        ESP_LOGW(TAG, "Không thể lấy Mutex để đọc ADC");
+        return -99.0f;
+    }
 
     if (ret != ESP_OK || raw_adc <= 0 || raw_adc >= 4095) {
-        ESP_LOGW(TAG, "Lỗi đọc ADC hoặc đứt dây/ngắn mạch (ADC: %d)", raw_adc);
+        ESP_LOGW(TAG, "Lỗi đọc ADC (ADC: %d)", raw_adc);
         return -99.0f; 
     }
 
-    // --- TÍNH TOÁN CHO SƠ ĐỒ: 3.3V -> R_REF -> NTC -> GND ---
-    // Điện áp tại chân ADC tỉ lệ thuận với điện trở NTC
-    // V_out = V_in * (R_ntc / (R_ref + R_ntc))
-    // => R_ntc = R_ref / ( (ADC_MAX / raw_adc) - 1 )
+    // --- Tính toán nhiệt độ ---
     float r_ntc = R_REF / ((ADC_MAX / (float)raw_adc) - 1.0f);
+    float temp = r_ntc / R_NOMINAL;
+    temp = log(temp);
+    temp /= BETA;
+    temp += 1.0f / T_NOMINAL;
+    temp = 1.0f / temp - 273.15f;
 
-    // --- Tính nhiệt độ theo công thức Steinhart-Hart ---
-    float temp;
-    temp = r_ntc / R_NOMINAL;          // (R / Ro)
-    temp = log(temp);                  // ln(R / Ro)
-    temp /= BETA;                      // 1/B * ln(R / Ro)
-    temp += 1.0f / T_NOMINAL;          // + (1 / To)
-    temp = 1.0f / temp;                // Nghịch đảo ra Kelvin
-    temp -= 273.15f;                   // Đổi Kelvin sang Celsius
+    // 2. Gửi dữ liệu vào Queue (không chờ nếu queue đầy để tránh block task cảm biến)
+    if (ntc_queue != NULL) {
+        xQueueSend(ntc_queue, &temp, 0);
+    }
 
-    ESP_LOGI(TAG, "ADC Raw: %d | R_NTC: %.1f | Temp: %.2f C", raw_adc, r_ntc, temp);
+    // 3. Kích hoạt Semaphore nếu nhiệt độ quá cao (ví dụ để bật bơm phun sương ngay lập tức)
+    if (temp > TEMP_THRESHOLD && ntc_threshold_sem != NULL) {
+        xSemaphoreGive(ntc_threshold_sem);
+    }
+
+    ESP_LOGI(TAG, "Temp: %.2f C", temp);
     return temp;
 }
