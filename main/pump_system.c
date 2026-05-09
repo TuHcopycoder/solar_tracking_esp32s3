@@ -11,11 +11,15 @@ void pump_init(void) {
     };
     gpio_config(&io_conf);
     
-    // Đảm bảo bơm tắt khi vừa khởi động
+    // Đảm bảo bơm tắt khi vừa khởi động (Mức 1 là tắt đối với module kích mức thấp)
     pump_control(false); 
 }
 
 void pump_control(bool state) {
-    // Nếu Relay của bạn là loại kích mức THẤP (Low-level trigger) thì đổi ngược lại: state ? 0 : 1
+    /* 
+       LƯU Ý: Nếu bạn dùng Module Relay có Jumper set ở 'L' (Low):
+       - state = true  (Bật) -> Xuất mức 0 (LOW)
+       - state = false (Tắt) -> Xuất mức 1 (HIGH)
+    */
     gpio_set_level(PUMP_PIN, state ? 1 : 0); 
-}
+}    
