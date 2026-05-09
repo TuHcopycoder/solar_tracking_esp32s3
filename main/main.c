@@ -10,7 +10,6 @@
 #include "ldr_logic.h"
 #include "motor_control.h"
 #include "pump_system.h"
-// ĐÃ XÓA: #include "rain_sensor.h"
 
 // Biến toàn cục lấy từ ldr_logic.c sang
 extern int g_lcd_max_light;
