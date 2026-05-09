@@ -2,165 +2,156 @@
 #include "freertos/FreeRTOS.h"  
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
-#include "freertos/semphr.h"
+
+// Include các module dự án
 #include "i2c_lcd.h"
 #include "ntc_sensor.h"
 #include "ldr_logic.h"
 #include "motor_control.h"
 #include "pump_system.h"
 
-// Biến toàn cục lấy từ ldr_logic.c sang
+// Biến toàn cục từ các module khác
 extern int g_lcd_max_light;
 extern bool g_lcd_is_tracking;
 
 static const char *TAG = "MAIN_SYSTEM";
 
-// --- CẬP NHẬT NGƯỠNG NHIỆT ĐỘ (VÙNG TRỄ CHỐNG CHÁY BƠM) ---
-#define TEMP_TURN_ON   40.0f    // Trên 40 độ -> Bật bơm
-#define TEMP_TURN_OFF  38.0f    // Dưới 38 độ -> Tắt bơm
-#define LIGHT_CHECK_MS  3000    // Kiểm tra ánh sáng mỗi 3 giây
+// Cấu hình kiểm tra ánh sáng
+#define LIGHT_CHECK_MS  3000    
 
-SemaphoreHandle_t adc_mutex;
-TaskHandle_t ldr_task_handle = NULL;
+// Handle ADC dùng chung toàn hệ thống
 static adc_oneshot_unit_handle_t g_adc_handle;
+SemaphoreHandle_t adc_mutex = NULL; 
+TaskHandle_t ldr_task_handle = NULL;
 
-// ─── BIẾN TOÀN CỤC CHO HỆ THỐNG LÀM MÁT ───
-static bool is_pumping = false; 
-static float avg_temp = 25.0f; 
-static bool is_first_read = true; 
-
-// ─── TIMER 1: Cooling – chạy mỗi 5 giây ────────────────────────────
-static void cooling_timer_callback(TimerHandle_t xTimer) {
-    float current_temp = 0.0f;
-
-    // Đọc ADC có Mutex bảo vệ
-    if (xSemaphoreTake(adc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        current_temp = ntc_read_temp(g_adc_handle);
-        xSemaphoreGive(adc_mutex);
-    }
-
-    // Bỏ qua tính toán nếu lỗi cảm biến
-    if (current_temp == -99.0f) {
-        ESP_LOGW(TAG, "Lỗi đọc cảm biến NTC, bỏ qua chu kỳ này.");
-        return; 
-    }
-
-    // --- BỘ LỌC CHỐNG NHIỄU NTC ---
-    if (is_first_read) {
-        avg_temp = current_temp; // Lấy giá trị đầu tiên làm gốc
-        is_first_read = false;
-    } else {
-        // Lấy 80% giá trị cũ + 20% giá trị mới để ủi phẳng nhiễu
-        avg_temp = (avg_temp * 0.8f) + (current_temp * 0.2f);
-    }
-
-    // --- LOGIC ĐIỀU KHIỂN BƠM (Chỉ dùng nhiệt độ) ---
-    // Áp dụng Vùng trễ (Hysteresis) 
-    if (!is_pumping && avg_temp > TEMP_TURN_ON) {
-        is_pumping = true;
-      pump_control(true);
-        ESP_LOGI(TAG, "Nhiệt độ cao (%.1f°C), KÍCH HOẠT phun sương...", avg_temp);
-    } 
-    else if (is_pumping && avg_temp < TEMP_TURN_OFF) {
-        is_pumping = false;
-        pump_control(false);
-        ESP_LOGI(TAG, "Đã làm mát xong (%.1f°C), TẮT bơm.", avg_temp);
+/**
+ * @brief Task đọc nhiệt độ định kỳ
+ * Sử dụng hàm ntc_read_temp đã tích hợp sẵn Mutex bảo vệ ADC và Queue gửi dữ liệu.
+ */
+void ntc_task(void *pvParameters) {
+    ESP_LOGI(TAG, "NTC Task started.");
+    while (1) {
+        // Hàm này tự động gửi giá trị vào ntc_queue và kích hoạt ntc_threshold_sem nếu quá nóng
+        ntc_read_temp(g_adc_handle); 
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Cập nhật mỗi 5 giây
     }
 }
 
-// ─── TIMER 2: Check ánh sáng – resume ldr_task nếu trời sáng lại ───
+/**
+ * @brief Timer callback kiểm tra ánh sáng
+ * Nếu trời sáng lại (dựa trên SUN_LIMIT), sẽ resume Task dò hướng nắng.
+ */
 static void light_check_callback(TimerHandle_t xTimer) {
     int val = 0;
-
-    // Đọc thử 1 kênh LDR bất kỳ để check ánh sáng
-    if (xSemaphoreTake(adc_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    // Sử dụng ntc_mutex (khai báo extern trong ntc_sensor.h) để dùng chung bộ ADC
+    if (xSemaphoreTake(ntc_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         adc_oneshot_read(g_adc_handle, LDR_XP_CH, &val);
-        xSemaphoreGive(adc_mutex);
+        xSemaphoreGive(ntc_mutex);
     }
 
     if (val >= SUN_LIMIT) {
-        // Trời sáng rồi → resume ldr_task nếu đang bị suspend
         if (eTaskGetState(ldr_task_handle) == eSuspended) {
-            ESP_LOGI(TAG, "Trời sáng (val=%d), resume LDR Task!", val);
+            ESP_LOGI(TAG, "Troi sang (LDR=%d), khoi phuc Sun Tracking Task!", val);
             vTaskResume(ldr_task_handle);
         }
     }
 }
 
-// ─── TASK LCD: Hiển thị thông số ────────────────────────────────────
+/**
+ * @brief Task hiển thị LCD
+ * Lấy dữ liệu từ Queue và trạng thái thực tế của thiết bị để cập nhật màn hình.
+ */
 void lcd_task(void *pvParameters) {
-    ESP_LOGI("LCD", "Khởi tạo LCD I2C...");
-    
-    i2c_master_init(); // Khởi tạo chân I2C
-    lcd_init();        // Gửi lệnh khởi động màn hình
+    i2c_master_init();
+    lcd_init();
     lcd_clear();
     
-    char buffer[17]; // Buffer chứa 16 ký tự + \0 của LCD 16x2
+    char buffer[17];
+    float current_temp = 0.0f;
     
     while (1) {
-        // --- Dòng 1: Nhiệt độ & Bơm (Ví dụ: "T:40.5C Pmp:ON ") ---
-        // Dùng %5.1f để cố định độ rộng 5 khoảng trống cho nhiệt độ
-snprintf(buffer, sizeof(buffer), "T:%5.1fC P:%-3s", avg_temp, is_pumping ? "ON" : "OFF");
+        // Xem giá trị mới nhất từ Queue mà không xóa nó khỏi hàng đợi (Peek)
+        if (xQueuePeek(ntc_queue, &current_temp, 0) != pdTRUE) {
+            // Nếu chưa có dữ liệu, giữ nguyên current_temp = 0
+        }
+
+        // Dòng 1: Nhiệt độ & Trạng thái Bơm
+        // Kiểm tra trực tiếp mức GPIO của chân PUMP_PIN để biết bơm đang ON hay OFF
+        snprintf(buffer, sizeof(buffer), "T:%5.1fC P:%-3s", 
+                 current_temp, (gpio_get_level(PUMP_PIN) ? "ON" : "OFF"));
         lcd_put_cur(0, 0);
         lcd_send_string(buffer);
         
-        // --- Dòng 2: Ánh sáng & Trạng thái dò (Ví dụ: "L:2500 Trk:RUN ") ---
-        sprintf(buffer, "L:%-4d Trk:%s ", g_lcd_max_light, g_lcd_is_tracking ? "RUN" : "OFF");
+        // Dòng 2: Cường độ sáng & Trạng thái Tracking
+        snprintf(buffer, sizeof(buffer), "L:%-4d Trk:%s ", 
+                 g_lcd_max_light, g_lcd_is_tracking ? "RUN" : "OFF");
         lcd_put_cur(1, 0);
         lcd_send_string(buffer);
         
-        // Cập nhật màn hình 1 giây/lần
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Cập nhật LCD mỗi 1 giây
     }
 }
 
+/**
+ * @brief Hàm chính khởi tạo toàn bộ hệ thống
+ */
 void app_main(void) {
-    ESP_LOGI(TAG, "Khởi động Hệ thống Tối ưu Pin Năng lượng Mặt trời...");
-    
+    ESP_LOGI(TAG, "=== KHOI DONG SOLAR TRACKER ESP32-S3 ===");
+
+    // 1. Khởi tạo phần cứng cơ bản
     motor_init();
-    pump_init();
-   
     
+    // 2. Khởi tạo các cơ chế RTOS (Mutex, Queue, Semaphore)
+    // Rất quan trọng: Phải gọi trước khi tạo Task
+    ntc_init_rtos();
+    pump_init_rtos();
+adc_mutex = xSemaphoreCreateMutex();
+    ntc_init_rtos();
+    // 3. Cấu hình bộ ADC Unit 1
     adc_oneshot_unit_init_cfg_t init_config = { .unit_id = ADC_UNIT_1 };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &g_adc_handle));
     
     adc_oneshot_chan_cfg_t adc_config = {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten    = ADC_ATTEN_DB_12,
+        .atten    = ADC_ATTEN_DB_12, // Dải đo lên tới ~3.1V cho ESP32-S3
     };
     
+    // Cấu hình các kênh ADC cho NTC và 4 quang trở LDR
     ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, NTC_ADC_CHANNEL, &adc_config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_XP_CH,       &adc_config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_XM_CH,       &adc_config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_YP_CH,       &adc_config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_YM_CH,       &adc_config));
-    
-    adc_mutex = xSemaphoreCreateMutex();
-    assert(adc_mutex != NULL);
-    
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_XP_CH, &adc_config));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_XM_CH, &adc_config));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_YP_CH, &adc_config));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_YM_CH, &adc_config));
+
+    // 4. Tạo các Task xử lý đa nhiệm
+    // Task dò nắng (Ưu tiên cao nhất: 5)
     xTaskCreate(ldr_task, "Sun_Tracking", 4096, (void*)g_adc_handle, 5, &ldr_task_handle);
     
+    // Task cảm biến nhiệt độ (Ưu tiên: 4)
+    xTaskCreate(ntc_task, "NTC_Task", 4096, NULL, 4, NULL);
+    
+    // Task quản lý bơm (Ưu tiên: 4 - Chờ lệnh từ Semaphore/Queue)
+    xTaskCreate(pump_task, "Pump_Task", 4096, NULL, 4, NULL);
+    
+    // Task hiển thị (Ưu tiên thấp hơn: 2)
     xTaskCreate(lcd_task, "LCD_Task", 4096, NULL, 2, NULL);
     
-    // Timer 1: Cooling mỗi 5 giây
-    TimerHandle_t cooling_timer = xTimerCreate(
-        "CoolingTimer", pdMS_TO_TICKS(5000), pdTRUE, NULL, cooling_timer_callback
-    );
-    assert(cooling_timer != NULL);
-    xTimerStart(cooling_timer, 0);
-
-    // Timer 2: Check ánh sáng mỗi 3 giây để resume ldr_task
+    // 5. Khởi tạo Software Timer kiểm tra ánh sáng định kỳ
     TimerHandle_t light_timer = xTimerCreate(
         "LightCheck", pdMS_TO_TICKS(LIGHT_CHECK_MS), pdTRUE, NULL, light_check_callback
     );
-    assert(light_timer != NULL);
-    xTimerStart(light_timer, 0);
+    if (light_timer != NULL) {
+        xTimerStart(light_timer, 0);
+    }
     
-    ESP_LOGI(TAG, "Hệ thống đã sẵn sàng.");
+    ESP_LOGI(TAG, "He thong da san sang van hanh.");
     
+    // Loop trống cho app_main
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(60000));
     }
 }
