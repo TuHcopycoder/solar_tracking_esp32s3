@@ -61,7 +61,7 @@ static void cooling_timer_callback(TimerHandle_t xTimer) {
     // Áp dụng Vùng trễ (Hysteresis) 
     if (!is_pumping && avg_temp > TEMP_TURN_ON) {
         is_pumping = true;
-        pump_control(true);
+      pump_control(true);
         ESP_LOGI(TAG, "Nhiệt độ cao (%.1f°C), KÍCH HOẠT phun sương...", avg_temp);
     } 
     else if (is_pumping && avg_temp < TEMP_TURN_OFF) {
@@ -102,7 +102,8 @@ void lcd_task(void *pvParameters) {
     
     while (1) {
         // --- Dòng 1: Nhiệt độ & Bơm (Ví dụ: "T:40.5C Pmp:ON ") ---
-        sprintf(buffer, "T:%.1fC Pmp:%s ", avg_temp, is_pumping ? "ON " : "OFF");
+        // Dùng %5.1f để cố định độ rộng 5 khoảng trống cho nhiệt độ
+snprintf(buffer, sizeof(buffer), "T:%5.1fC P:%-3s", avg_temp, is_pumping ? "ON" : "OFF");
         lcd_put_cur(0, 0);
         lcd_send_string(buffer);
         
@@ -116,13 +117,12 @@ void lcd_task(void *pvParameters) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 void app_main(void) {
     ESP_LOGI(TAG, "Khởi động Hệ thống Tối ưu Pin Năng lượng Mặt trời...");
     
     motor_init();
     pump_init();
-    // ĐÃ XÓA: rain_sensor_init();
+   
     
     adc_oneshot_unit_init_cfg_t init_config = { .unit_id = ADC_UNIT_1 };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &g_adc_handle));
