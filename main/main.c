@@ -140,10 +140,8 @@ void app_main(void) {
     adc_mutex = xSemaphoreCreateMutex();
     assert(adc_mutex != NULL);
     
-    // Tạo LDR task — lưu handle (Ưu tiên 5)
     xTaskCreate(ldr_task, "Sun_Tracking", 4096, (void*)g_adc_handle, 5, &ldr_task_handle);
     
-    // Tạo LCD Task (Ưu tiên 2)
     xTaskCreate(lcd_task, "LCD_Task", 4096, NULL, 2, NULL);
     
     // Timer 1: Cooling mỗi 5 giây
