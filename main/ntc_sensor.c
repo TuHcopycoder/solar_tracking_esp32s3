@@ -17,11 +17,9 @@ SemaphoreHandle_t ntc_threshold_sem = NULL;
 #define TEMP_THRESHOLD 40.0f   // Ngưỡng nhiệt độ để kích hoạt Semaphore (ví dụ 40 độ C)
 
 void ntc_init_rtos(void) {
-    // Tạo Mutex để bảo vệ tài nguyên ADC
+
     ntc_mutex = xSemaphoreCreateMutex();
-    // Tạo Queue chứa tối đa 5 giá trị nhiệt độ (float)
     ntc_queue = xQueueCreate(5, sizeof(float));
-    // Tạo Binary Semaphore để báo động nhiệt độ cao
     ntc_threshold_sem = xSemaphoreCreateBinary();
 }
 
