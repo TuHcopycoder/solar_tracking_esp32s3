@@ -31,8 +31,7 @@ void motor_task(void *pvParameters) {
             ledc_set_duty(LEDC_MODE, chan, duty);
             ledc_update_duty(LEDC_MODE, chan);
         } else {
-            // HẾT 500ms KHÔNG CÓ TÍN HIỆU -> LDR đã cân bằng hoặc bị che tối
-            // Giải pháp: Ghi Duty = 0 để ngắt hoàn toàn PWM -> Servo thả lỏng, hết rung giật
+         
             ledc_set_duty(LEDC_MODE, LEDC_CHANNEL_0, 0);
             ledc_update_duty(LEDC_MODE, LEDC_CHANNEL_0);
             
