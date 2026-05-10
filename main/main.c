@@ -128,16 +128,16 @@ adc_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(adc_oneshot_config_channel(g_adc_handle, LDR_YM_CH, &adc_config));
 
     // 4. Tạo các Task xử lý đa nhiệm
-    // Task dò nắng (Ưu tiên cao nhất: 5)
+    // Task dò nắng
     xTaskCreate(ldr_task, "Sun_Tracking", 4096, (void*)g_adc_handle, 5, &ldr_task_handle);
     
-    // Task cảm biến nhiệt độ (Ưu tiên: 4)
+    // Task cảm biến nhiệt độ 
     xTaskCreate(ntc_task, "NTC_Task", 4096, NULL, 4, NULL);
     
-    // Task quản lý bơm (Ưu tiên: 4 - Chờ lệnh từ Semaphore/Queue)
+    // Task quản lý bơm 
     xTaskCreate(pump_task, "Pump_Task", 4096, NULL, 4, NULL);
     
-    // Task hiển thị (Ưu tiên thấp hơn: 2)
+    // Task hiển thị 
     xTaskCreate(lcd_task, "LCD_Task", 4096, NULL, 2, NULL);
     
     // 5. Khởi tạo Software Timer kiểm tra ánh sáng định kỳ
